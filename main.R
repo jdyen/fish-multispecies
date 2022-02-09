@@ -7,127 +7,25 @@
 # packages for data access and manipulation
 library(aae.hydro)
 library(qs)
-library(RPostgres)
-library(DBI)
 library(readr)
 library(dplyr)
 library(tidyr)
 library(lubridate)
 
 # packages for analyses
-library(cmdstanr)
+library(rstan)
 
-# load data
+# some helper functions
+source("R/load-data.R")
 
-# check if fish data exist
-if ("vefmap-compiled.qs" %in% dir("data")) {
-  
-  # load from disk if possible
-  vefmap <- qread("data/vefmap-compiled.qs")
-  
-} else {
-  
-  # connect to db
-  con <- dbConnect(
-    RPostgres::Postgres(),
-    dbname = "arispatialdb",
-    host = "ari-spatial-poc-db.cluster-custom-cepp1cnsvaah.ap-southeast-2.rds.amazonaws.com", 
-    port = "5432", 
-    user = "aae_user",
-    password = rstudioapi::askForPassword("Database password")
-  )
-  
-  # view flat vefmap database
-  vefmap <- tbl(con, in_schema(sql("aquatic_data"), sql("v_vefmap_flat_data")))
-  
-  # remove species that won't be included in analyses, filter to target waterbodies,
-  #   and grab EF data only
-  vefmap <- vefmap %>% filter(
-    gear_type %in% c("EFB", "EF_BM", "EF_BP", "EF_LB", "EF_MB"),
-    !scientific_name %in% c("Anura spp.", "Maccullochella", "Hyriidae spp.", "unidentified turtle"),
-    waterbody %in% c("GOULBURN", "WIMMERA", "LODDON", "CAMPASPE", "BROKEN", "PYRAMID CK", "LITTLE MURRAY", "MacKenzie", "Burnt Creek", "Mt William Creek")
-  )
-  
-  # and collect
-  vefmap <- vefmap %>% collect()
-  
-  # find nearest flow gauges for each site
-  vefmap_coords <- vefmap %>% distinct(site_name, waterbody, lon, lat)
-  gauges <- vector("list", length = nrow(vefmap_coords))
-  for (i in seq_len(nrow(vefmap_coords))) {
-    gauges[[i]] <- tbl(con, sql(
-      paste0(
-        "SELECT * FROM stream_network.get_closest_gauges(",
-        vefmap_coords$lon[i], " , ", vefmap_coords$lat[i],
-        ")"
-      )
-    )) %>%
-      filter(
-        field == "Y"
-      ) %>%
-      collect()
-  }
-  
-  # disconnect from db
-  dbDisconnect(con)
-  
-  # clean up species and waterbody names
-  vefmap <- vefmap %>% mutate(
-    scientific_name = clean_scinames(scientific_name),
-    waterbody = clean_waterbody(waterbody),
-    reach = add_reach(notes),
-    reach = check_reach(reach, waterbody, site_name),
-    region = add_region(waterbody)
-  )
-  
-  # add manually identified gauges
-  vefmap <- add_gauge(vefmap)
-  
-  # save to disk
-  qsave(vefmap, file = "data/vefmap-compiled.qs")
-  
-}
+# load fish data
+vefmap <- qread("data/vefmap-compiled.qs")
+vefmap <- vefmap %>% mutate(
+  reach = check_reach(reach, waterbody, site_name)
+)
 
-# check if flow data exist
-if ("flow-compiled.qs" %in% dir("data")) {
-  
-  # load from disk if possible
-  flow <- qread("data/flow-compiled.qs")
-  
-} else {
-  
-  # find unique stations so we can download data just for those
-  all_gauges <- vefmap %>%
-    group_by(best_station, reach, waterbody) %>%
-    summarise(
-      min_date = min(sdate),
-      max_date = max(sdate)
-    ) %>%
-    mutate(
-      min_date = floor_date(min_date, unit = "years") - years(2),
-      max_date = ymd(paste0(year(max_date), "-12-31"))
-    )
-  
-  # go through each and grab data one gauge at a time
-  flow <- vector("list", length = nrow(all_gauges))
-  names(flow) <- all_gauges$best_station
-  for (i in seq_along(flow)) {
-    flow[[i]] <- fetch_hydro(
-      sites = all_gauges$best_station[i],
-      start = all_gauges$min_date[i],
-      end = all_gauges$max_date[i],
-      include_missing = TRUE,
-      options = list(
-        varfrom = c("100.00", "450.00"),
-        varto = c("141.00", "450.00")
-      )
-    )
-  }
-  
-  # save to disk
-  qsave(flow, file = "data/flow-compiled.qs")
-  
-}
+# load flow data
+flow <- qread("data/flow-compiled.qs")
 
 # impute missing flow values
 for (i in seq_along(flow)) {
@@ -150,10 +48,24 @@ effort <- vefmap %>%
     effort = sum(seconds)
   )
 
+# define priority species
+priority_spp <- c(
+  'cyprinus_carpio',
+  'maccullochella_peelii', 
+  'macquaria_ambigua', 
+  'perca_fluviatilis', 
+  'gambusia_holbrooki', 
+  'gadopsis_marmoratus', 
+  'melanotaenia_fluviatilis', 
+  'retropinna_semoni', 
+  'bidyanus_bidyanus', 
+  'maccullochella_macquariensis'
+)
+
 # compile abundances by species and size class for records with
 #   length data only
 size_abundance <- vefmap %>%
-  filter(!is.na(length_mm)) %>%
+  filter(!is.na(length_mm), scientific_name %in% priority_spp) %>%
   group_by(waterbody, reach, site_name, id_survey, sdate, scientific_name, size_class) %>%
   summarise(
     count = n()
@@ -162,175 +74,211 @@ size_abundance <- vefmap %>%
   ungroup %>%
   arrange(waterbody, reach, sdate)
 
-size_abundance <- size_abundance %>%
-  pivot_wider(
-    id_cols = c("waterbody", "reach", "site_name", "id_survey", "sdate", "effort"),
-    names_from = c(scientific_name, size_class),
-    values_from = count,
-    values_fill = 0
-  )
-size_abundance_counts <- size_abundance %>% select(7:ncol(size_abundance)) %>% as.matrix()
-size_abundance_offset <- size_abundance %>% select(effort) %>% as.matrix()
-
-# add some covariates
-size_abundance_covariates <- get_metrics(flow, size_abundance)
-size_abundance_covariates <- size_abundance_covariates %>%
-  mutate(
-    waterbody_id = rebase_factor(waterbody),
-    reach_id = rebase_factor(paste(waterbody, reach, sep = "_")),
-    site_id = rebase_factor(site_name),
-    year_id = rebase_factor(year(sdate))
-  ) %>%
-  select(-effort)
-size_abundance_covariates_clean <- size_abundance_covariates %>% 
-  select(-waterbody, -reach, -site_name, -id_survey, -sdate) %>% 
-  as.matrix
-
-# standardise rownames to match everything up
-rownames(size_abundance_counts) <- rownames(size_abundance_offset) <- rownames(size_abundance_covariates_clean) <- 
-  paste(size_abundance$site_name, size_abundance$id_survey, sep = "_")
-size_abundance_collated <- prepare_data(
-  counts = size_abundance_counts,
-  covariates = size_abundance_covariates_clean,
-  offset = size_abundance_offset
+# grab a list of unique sites/years and fill an array with counts for each
+#   site, year, species, and size class
+info <- size_abundance %>% 
+  select(waterbody, reach, site_name, id_survey, sdate, effort) %>%
+  mutate(syear = year(sdate)) %>%
+  distinct()
+info <- add_gauge(info)
+nsite <- length(unique(info$site_name))
+nyear <- length(unique(info$syear))
+nsp <- length(unique(size_abundance$scientific_name))
+nclass <- length(unique(size_abundance$size_class))
+y <- array(0, dim = c(nsite, nyear, nsp, nclass))
+dimnames(y) <- list(
+  sort(unique(info$site_name)),
+  sort(unique(info$syear)),
+  sort(unique(size_abundance$scientific_name)),
+  sort(unique(size_abundance$size_class))
 )
+for (i in seq_len(nrow(size_abundance))) {
+  tmp <- size_abundance[i, ]
+  y[tmp$site_name, as.character(year(tmp$sdate)), tmp$scientific_name, as.character(tmp$size_class)] <- tmp$count
+}
 
-# settings for variational Bayes and MCMC
-seed <- 5623256
+## NOTE: some surveys at a single site occur twice in a year; these are currently
+##   omitted from analyses due to data format (site x year)
 
-# settings for MCMC
-iter <- 400
-warmup <- 400
-chains <- 2
-refresh <- floor(iter / 5)
+# which sites were visited?
+visited <- apply(y, c(1, 2), sum) > 0
+
+# calculate covariates
+size_abundance_covariates <- get_metrics(flow, info)
+covars <- c("ave_spring", "ave_summer", "ave_antecedent", "low_flow", "cv_flow")
+ncovar <- length(covars)
+X <- array(NA, dim = c(nsite, nyear, ncovar))
+dimnames(X) <- list(
+  sort(unique(info$site_name)),
+  sort(unique(info$syear)),
+  covars
+)
+for (i in seq_len(nrow(size_abundance_covariates))) {
+  tmp <- size_abundance_covariates[i, ]
+  X[tmp$site_name, as.character(year(tmp$sdate)), covars] <- unlist(tmp[covars])
+}
+X <- lapply(seq_len(nyear), function(i, .x) .x[, i, ], .x = X)
+X <- do.call(rbind, X)
+X <- apply(X, 2, function(x) ifelse(is.na(x), median(x, na.rm = TRUE), x))
+X_std <- sweep(X, 2, colMeans(X), "-")
+X_std <- sweep(X_std, 2, apply(X_std, 2, sd), "/")
+
+# calculate effort data
+eff <- array(0, dim = c(nsite, nyear))
+dimnames(eff) <- list(
+  sort(unique(info$site_name)),
+  sort(unique(info$syear))
+)
+for (i in seq_len(nrow(info))) {
+  tmp <- info[i, ]
+  eff[tmp$site_name, as.character(year(tmp$sdate))] <- tmp$effort
+}
+eff <- ifelse(eff == 0, median(eff[eff > 0]), eff)
+
+# define some extra vars
+idx <- match(dimnames(y)[[1]], info$site_name)
+river <- info$waterbody[idx]
+reach <- paste(river, info$reach[idx], sep = "_")
+river <- rebase_factor(river)
+reach <- rebase_factor(reach)
+
+# expand over years to match response matrix dims
+river <- rep(river, times = nyear)
+reach <- rep(reach, times = nyear)
+site <- rep(seq_len(nsite), times = nyear)
+year <- rep(seq_len(nyear), each = nsite)
 
 # initial matrix normal model (AR1)
-y_time_flat <- aperm(array(c(aperm(y_time, c(3, 4, 1, 2))), dim = c(nsp * nclass, nsite, nyear)), c(2, 3, 1))
+y_flat <- aperm(array(c(aperm(y, c(3, 4, 1, 2))), dim = c(nsp * nclass, nsite, nyear)), c(2, 3, 1))
+y_diminished <- do.call(rbind, lapply(seq_len(nyear), function(i, .x) .x[, i, ], .x = y_flat))
+y_diminished <- y_diminished[c(visited), ]
+X_diminished <- X_std[c(visited), ]
+eff_diminished <- c(eff)[c(visited)]
+river <- rebase_factor(river[c(visited)])
+reach <- rebase_factor(reach[c(visited)])
+site <- rebase_factor(site[c(visited)])
+year <- rebase_factor(year[c(visited)])
 dat <- list(
-  N = N_time, K = K,
-  nsp = nsp, nclass = nclass,
-  ntime = nyear,
-  ar_order = 1L,
-  nriver = nriver,
-  nreach = nreach,
-  river = river[seq_len(N_time)],
-  reach = reach[seq_len(N_time)],
-  X = X_sim,
-  y = y_time_flat
+  N = nrow(y_diminished), K = ncovar,
+  nsp = nsp, nclass = nclass, nq = nsp * nclass,
+  X = X_diminished,
+  y = y_diminished,
+  log_effort = log(eff_diminished),
+  nriver = max(river),
+  nreach = max(reach),
+  nsite = max(site),
+  nyear = max(year),
+  river = river,
+  reach = reach,
+  site = site,
+  year = year
 )
-file <- file.path("src/matrix_normal_ar.stan")
-mod <- cmdstan_model(file)
-# fit <- mod$sample(
-#   data = dat, 
-#   iter_warmup = warmup,
-#   iter_sampling = iter,
-#   chains = chains, 
-#   parallel_chains = chains,
-#   refresh = refresh
-# )
-fit <- mod$variational(
-  data = dat, 
-  seed = seed,
-  output_samples = 1000
-)
-fit$save_object(file = "outputs/fitted/fit_struc.rds")
 
-# unstructured multivariate normal model (AR1)
-dat <- list(
-  N = N_time, K = K,
-  nn = nsp, nm = nclass, nq = nsp * nclass,
-  ntime = nyear,
-  ar_order = 1L,
-  nriver = nriver,
-  nreach = nreach,
-  river = river[seq_len(N_time)],
-  reach = reach[seq_len(N_time)],
-  X = X_sim,
-  y = y_time_flat,
-  eta = 1
-)
-init_set <- lapply(
-  seq_len(chains), 
+# think through this, should be identifying each survey based on
+#  its position in diminished data set, then linking each year to
+#  the previous year. Records 0 if site not visited in previous
+#  year, which can be used in the Stan model to check for form of
+#  ar_term.
+y_previous_idx <- matrix(0, nrow = nsite, ncol = nyear)
+y_previous_idx[visited] <- seq_len(sum(visited))
+y_previous_idx <- cbind(rep(0, nsite), y_previous_idx[, -nyear])
+visited_previous <- y_previous_idx > 0
+y_previous_idx <- c(y_previous_idx)[visited]  # filter on visited (not visited_previous) to match y
+visited_previous <- c(visited_previous)[visited]  # filter on visited (not visited_previous) to match y
+
+# add these to data set
+dat$prev_idx <- y_previous_idx
+dat$visited_prev <- visited_previous
+
+# create a variable with y + 1 to save converting arrays to matrices in Stan
+dat$yp1 <- dat$y + 1
+
+# add index for missing observations and update prev_idx to match these correctly
+missing_idx <- !dat$visited_prev
+dat$nmissing <- sum(missing_idx)
+dat$prev_idx[missing_idx] <- seq_len(dat$nmissing)
+
+# settings for variational Bayes and MCMC
+seed <- 353532
+
+# settings for MCMC
+iter <- 4000
+warmup <- 2000
+chains <- 4
+cores <- 4
+
+# fit model with alternative parameterisation of matrix normal
+file_alt <- file.path("src/matrix_normal_alt_param.stan")
+mod_alt <- stan_model(file = file_alt)
+
+# define some initial conditions
+empirical_corr_sp <- cor(apply(y, c(1, 3), sum))
+empirical_corr_class <- cor(apply(y, c(1, 4), sum))
+init_alt <- lapply(
+  seq_len(chains),
   function(x) list(
-    L = diag(nsp * nclass),
-    eps = array(1, dim = c(N_time, K, nsp * nclass)),
-    sigma = rep(1, nsp * nclass)
+    L_sp = chol(empirical_corr_sp),
+    L_class = chol(empirical_corr_class)
   )
 )
-file <- file.path("src/multi_normal_unstructured_ar.stan")
-mod <- cmdstan_model(file)q
-# fit <- mod$sample(
-#   data = dat, 
-#   init = init_set,
-#   iter_warmup = iter,
-#   iter_sampling = warmup,
-#   chains = chains, 
-#   parallel_chains = chains,
-#   refresh = refresh
-# )
-fit <- mod$variational(
-  data = dat, 
-  seed = seed,
-  output_samples = 1000
+draws_alt <- sampling(
+  object = mod_alt,
+  data = dat,
+  init = init_alt,
+  pars = c("Sigma_sp", "Sigma_class", "alpha", "beta", "rho", "tau", "sigma_river", "sigma_reach", "sigma_site", "sigma_year", "log_y_missing", "log_y_shift_missing"),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  cores = cores,
+  control = list(adapt_delta = 0.75, max_treedepth = 15),
+  seed = seed
 )
-fit$save_object(file = "outputs/fitted/fit_unstruc.rds")
-
-# MVN species, IID size classes
-dat <- list(
-  N = N_time, K = K,
-  nsp = nsp, nclass = nclass,
-  ntime = nyear,
-  ar_order = 1L,
-  nriver = nriver,
-  nreach = nreach,
-  river = river[seq_len(N_time)],
-  reach = reach[seq_len(N_time)],
-  X = X_sim,
-  y = y_time_flat
-)
-file <- file.path("src/matrix_normal_ar_single_dim.stan")
-mod <- cmdstan_model(file)
-# fit <- mod$sample(
-#   data = dat, 
-#   iter_warmup = iter,
-#   iter_sampling = warmup,
-#   chains = chains, 
-#   parallel_chains = chains,
-#   refresh = refresh
-# )
-fit <- mod$variational(
-  data = dat, 
-  seed = seed,
-  output_samples = 1000
-)
-fit$save_object(file = "outputs/fitted/fit_mvn_spp.rds")
-
-# MVN size classes, IID species
-y_time_flat <- aperm(array(c(aperm(aperm(y_time, c(1:2, 4, 3)), c(3, 4, 1, 2))), dim = c(15 * 8, 120, 5)), c(2, 3, 1))
-dat <- list(
-  N = N_time, K = K,
-  nsp = nclass, nclass = nsp,  ## NOTE SWITCH HERE (_sp params are actually _class params)
-  ntime = nyear,
-  ar_order = 1L,
-  nriver = nriver,
-  nreach = nreach,
-  river = river[seq_len(N_time)],
-  reach = reach[seq_len(N_time)],
-  X = X_sim,
-  y = y_time_flat
-)
-# fit <- mod$sample(
-#   data = dat, 
-#   iter_warmup = iter,
-#   iter_sampling = warmup,
-#   chains = chains, 
-#   parallel_chains = chains,
-#   refresh = refresh
-# )
-fit <- mod$variational(
-  data = dat, 
-  seed = seed,
-  output_samples = 1000
+vb_alt <- vb(
+  object = mod_alt,
+  data = dat,
+  init = init_alt[[1]],
+  pars = c("Sigma_sp", "Sigma_class", "alpha", "beta", "rho", "tau", "sigma_river", "sigma_reach", "sigma_site", "sigma_year", "log_y_missing", "log_y_shift_missing"),
+  algorithm = "fullrank",
+  adapt_iter = 1000,
+  iter = 1000,
+  seed = seed
 )
 
-fit$save_object(file = "outputs/fitted/fit_mvn_size.rds")
+# save fitted
+qsave(draws_alt, file = "outputs/fitted/mat-normal-draws.qs")
+
+# load and summarise fitted
+draws_alt <- qread("outputs/fitted/mat-normal-draws.qs")
+sum_alt <- summary(draws_alt)
+
+cov_sp <- matrix(
+  sum_alt$summary[grepl("Sigma_sp", rownames(sum_alt$summary)), "mean"],
+  nrow = nsp,
+  byrow = TRUE
+)
+rownames(cov_sp) <- colnames(cov_sp) <- sort(unique(size_abundance$scientific_name))
+cov_class <- matrix(
+  sum_alt$summary[grepl("Sigma_class", rownames(sum_alt$summary)), "mean"],
+  nrow = nclass,
+  byrow = TRUE
+)
+cor_sp <- cov2cor(cov_sp)
+cor_class <- cov2cor(cov_class)
+
+# think about variances and covariances and correlations
+#   Size classes seem to have bigger absolute covars and corrs
+
+# extra other effects
+sum_alt$summary[grepl("sigma", rownames(sum_alt$summary)), ]
+sum_alt$summary[grepl("alpha", rownames(sum_alt$summary)), ]
+sum_alt$summary[grepl("beta", rownames(sum_alt$summary)), ]
+sum_alt$summary[grepl("tau", rownames(sum_alt$summary)), ]
+sum_alt$summary[grepl("rho", rownames(sum_alt$summary)), ]
+
+# plot all against priors
+
+# design main output plots
+
+## TODO: decide if singledim or unstruc models are feasible or worthwhile
+##   should be easy by setting one of the mats to I(nsp/nclass) or just writing
+##   an unstruc version

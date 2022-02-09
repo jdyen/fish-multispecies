@@ -49,7 +49,7 @@ add_reach <- function(x) {
 check_reach <- function(x, system, site) {
   
   # check mackenzie sites (1-5 are in reach 2, reach 3 otherwise)
-  idx <- system == "mackenzie"
+  idx <- system == "mackenzie_river"
   x[idx] <- ifelse(site[idx] %in% paste0("MR_", 1:5), 2, 3)
   
   # and burnt ck sites (1-5 and 11 are in reach 1, 2 otherwise)
@@ -57,7 +57,7 @@ check_reach <- function(x, system, site) {
   x[idx] <- ifelse(site[idx] %in% paste0("BC_", 6:10), 2, 1)
   
   # wimmera sites
-  idx <- system == "wimmera"
+  idx <- system == "wimmera_river"
   x[idx] <- ifelse(is.na(x[idx]), 2, x[idx])
   
   # return
@@ -110,28 +110,28 @@ find_nearest <- function(x, y) {
 
 # gauges
 gauge_lookup <- c(
-  "broken_r2" = 404216,            # Casey's weir head gauge, backup: 404241 Casey's Weir
-  "broken_r3" = 404224,            # Gowangardie
-  "broken_r4" = 404224,            # Gowangardie
-  "broken_r5" = 404214,            # Katamite
+  "broken_river_r2" = 404216,            # Casey's weir head gauge, backup: 404241 Casey's Weir
+  "broken_river_r3" = 404224,            # Gowangardie
+  "broken_creek_r4" = 404224,            # Gowangardie
+  "broken_creek_r5" = 404214,            # Katamite
   "burnt_creek_r1" = 415223,       # Wonwondah
   "burnt_creek_r2" = 415223,       # Wonwondah
-  "campaspe_r2" = 406201,          # Barnadown
-  "campaspe_r3" = 406202,          # Rochester
-  "campaspe_r4" = 406202,          # Rochester, closest missing data (406276 Fehrings)
-  "goulburn_r4" = 405200,          # Murchison, backup: 405276 Loch Garry
-  "goulburn_r5" = 405232,          # McCoys
-  "little_murray_rNA" = 409399,    # Little Murray Weir
-  "loddon_r2" = 407229,            # Serpentine Weir, backup: 407240 Laanecoorie head gauge
-  "loddon_r3" = 407229,            # Serpentine Weir, backup: 407240 laanecoorie head gauge  
-  "loddon_r4" = 407205,            # Appin South, backup: 407323 Yando Rd
-  "loddon_r5" = 407202,            # Kerang
-  "mackenzie_r2" = 415202,         # Wartook Reservoir, backup: 415251 Mck Ck
-  "mackenzie_r3" = 415251,         # McK river at McK Ck
+  "campaspe_river_r2" = 406201,          # Barnadown
+  "campaspe_river_r3" = 406202,          # Rochester
+  "campaspe_river_r4" = 406202,          # Rochester, closest missing data (406276 Fehrings)
+  "goulburn_river_r4" = 405200,          # Murchison, backup: 405276 Loch Garry
+  "goulburn_river_r5" = 405232,          # McCoys
+  "little_murray_river_rNA" = 409399,    # Little Murray Weir
+  "loddon_river_r2" = 407229,            # Serpentine Weir, backup: 407240 Laanecoorie head gauge
+  "loddon_river_r3" = 407229,            # Serpentine Weir, backup: 407240 laanecoorie head gauge  
+  "loddon_river_r4" = 407205,            # Appin South, backup: 407323 Yando Rd
+  "loddon_river_r5" = 407202,            # Kerang
+  "mackenzie_river_r2" = 415202,         # Wartook Reservoir, backup: 415251 Mck Ck
+  "mackenzie_river_r3" = 415251,         # McK river at McK Ck
   "mt_william_creek_rNA" = 415203, # Lake Lonsdale tail gauge
   "pyramid_creek_rNA" = 407295,    # Box Ck @ Mansfields Bridge, backup: 407294 Flannery's Bridge 
-  "wimmera_r2" = 415200,           # Horsham, backup 415261 Quantong
-  "wimmera_r3" = 415256            # U/S Dimboola, backup: 415261 Quantong
+  "wimmera_river_r2" = 415200,           # Horsham, backup 415261 Quantong
+  "wimmera_river_r3" = 415256            # U/S Dimboola, backup: 415261 Quantong
 )
 
 # function to check and replace flow gauges with appropriate ones
