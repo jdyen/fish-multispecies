@@ -1,8 +1,9 @@
 # script to fit Poisson-log Matrix Normal model to fish assemblage abundance 
-#   data using variational and MCMC sampling with cmdstan
+#   data using MCMC sampling with rstan
 
 # Author: Jian Yen
 # Date created: 2021/12/01
+# Updated: 2022/03/25
 
 # packages for data access and manipulation
 library(aae.hydro)
@@ -50,16 +51,16 @@ effort <- vefmap %>%
 
 # define priority species
 priority_spp <- c(
-  'cyprinus_carpio',
-  'maccullochella_peelii', 
-  'macquaria_ambigua', 
-  'perca_fluviatilis', 
-  'gambusia_holbrooki', 
-  'gadopsis_marmoratus', 
-  'melanotaenia_fluviatilis', 
-  'retropinna_semoni', 
-  'bidyanus_bidyanus', 
-  'maccullochella_macquariensis'
+  "cyprinus_carpio",
+  "maccullochella_peelii", 
+  "macquaria_ambigua", 
+  "perca_fluviatilis", 
+  "gambusia_holbrooki", 
+  "gadopsis_marmoratus", 
+  "melanotaenia_fluviatilis", 
+  "retropinna_semoni", 
+  "bidyanus_bidyanus", 
+  "maccullochella_macquariensis"
 )
 
 # compile abundances by species and size class for records with
@@ -171,7 +172,12 @@ dat <- list(
   river = river,
   reach = reach,
   site = site,
-  year = year
+  year = year,
+  phi_scale = 5.,
+  main_scale = 5.,
+  sigma_scale = 5.,
+  sigma_scale2 = 3.,
+  ar_scale = 0.5
 )
 
 # think through this, should be identifying each survey based on
@@ -198,59 +204,214 @@ missing_idx <- !dat$visited_prev
 dat$nmissing <- sum(missing_idx)
 dat$prev_idx[missing_idx] <- seq_len(dat$nmissing)
 
-# settings for variational Bayes and MCMC
+# settings for MCMC
 seed <- 353532
 
 # settings for MCMC
-iter <- 4000
+iter <- 5000
 warmup <- 2000
 chains <- 4
 cores <- 4
+thin <- 3
 
-# fit model with alternative parameterisation of matrix normal
-file_alt <- file.path("src/matrix_normal_alt_param.stan")
-mod_alt <- stan_model(file = file_alt)
+# compile and sample from matrix normal model
+mat_normal_file <- file.path("src/matrix_normal.stan")
+mod_mat_normal <- stan_model(file = mat_normal_file)
 
 # define some initial conditions
 empirical_corr_sp <- cor(apply(y, c(1, 3), sum))
 empirical_corr_class <- cor(apply(y, c(1, 4), sum))
-init_alt <- lapply(
+init_mat_normal <- lapply(
   seq_len(chains),
   function(x) list(
-    L_sp = chol(empirical_corr_sp),
-    L_class = chol(empirical_corr_class)
+    L_sp = t(chol(empirical_corr_sp)),
+    L_class = t(chol(empirical_corr_class))
   )
 )
-draws_alt <- sampling(
-  object = mod_alt,
+draws_mat_normal <- sampling(
+  object = mod_mat_normal,
   data = dat,
-  init = init_alt,
-  pars = c("Sigma_sp", "Sigma_class", "alpha", "beta", "rho", "tau", "sigma_river", "sigma_reach", "sigma_site", "sigma_year", "log_y_missing", "log_y_shift_missing"),
+  init = init_mat_normal,
+  pars = c(
+    "Sigma_sp", 
+    "Sigma_class", 
+    "alpha", 
+    "beta", 
+    "rho", 
+    "tau", 
+    "sigma_river", 
+    "sigma_reach", 
+    "sigma_site",
+    "sigma_year", 
+    "log_y_missing", 
+    "log_y_shift_missing",
+    "gamma_river",
+    "gamma_reach",
+    "gamma_site",
+    "gamma_year"
+  ),
   chains = chains,
   iter = iter,
   warmup = warmup,
+  thin = thin,
   cores = cores,
-  control = list(adapt_delta = 0.75, max_treedepth = 15),
-  seed = seed
-)
-vb_alt <- vb(
-  object = mod_alt,
-  data = dat,
-  init = init_alt[[1]],
-  pars = c("Sigma_sp", "Sigma_class", "alpha", "beta", "rho", "tau", "sigma_river", "sigma_reach", "sigma_site", "sigma_year", "log_y_missing", "log_y_shift_missing"),
-  algorithm = "fullrank",
-  adapt_iter = 1000,
-  iter = 1000,
+  control = list(adapt_delta = 0.85, max_treedepth = 15),
   seed = seed
 )
 
 # save fitted
-qsave(draws_alt, file = "outputs/fitted/mat-normal-draws.qs")
+qsave(draws_mat_normal, file = "outputs/fitted/mat-normal-draws-short.qs")
+
+# rm giant draws file
+rm(draws_mat_normal)
+
+# compile and sample from single-dimension matrix normal model
+mat_normal_single_file <- file.path("src/matrix_normal_single.stan")
+mod_mat_normal_single <- stan_model(file = mat_normal_single_file)
+
+# need a new data file too (species are target here, repeat for class below)
+dat_spp <- dat
+dat_spp$ntarget <- dat_spp$nsp
+dat_spp$nother <- dat_spp$nclass
+dat_spp$nsp <- dat_spp$nclass <- NULL
+
+# define some initial conditions
+init_mat_normal_spp <- lapply(
+  seq_len(chains),
+  function(x) list(
+    L_target = t(chol(empirical_corr_sp))
+  )
+)
+draws_mat_normal_spp <- sampling(
+  object = mod_mat_normal_single,
+  data = dat_spp,
+  init = init_mat_normal_spp,
+  pars = c(
+    "Sigma_target", 
+    "sigma_other",
+    "alpha", 
+    "beta", 
+    "rho", 
+    "tau", 
+    "sigma_river", 
+    "sigma_reach", 
+    "sigma_site",
+    "sigma_year", 
+    "log_y_missing", 
+    "log_y_shift_missing"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.8, max_treedepth = 15),
+  seed = seed
+)
+
+# save fitted
+qsave(draws_mat_normal_spp, file = "outputs/fitted/mat-normal-species-draws-short.qs")
+
+# rm giant draws file
+rm(draws_mat_normal_spp)
+
+# need a new data file too (classes are target here, species covered above)
+dat_class <- dat
+dat_class$ntarget <- dat_class$nclass
+dat_class$nother <- dat_class$nsp
+dat_class$nsp <- dat_class$nclass <- NULL
+
+# define some initial conditions
+init_mat_normal_class <- lapply(
+  seq_len(chains),
+  function(x) list(
+    L_target = t(chol(empirical_corr_class))
+  )
+)
+draws_mat_normal_class <- sampling(
+  object = mod_mat_normal_single,
+  data = dat_class,
+  init = init_mat_normal_class,
+  pars = c(
+    "Sigma_target", 
+    "sigma_other",
+    "alpha", 
+    "beta", 
+    "rho", 
+    "tau", 
+    "sigma_river", 
+    "sigma_reach", 
+    "sigma_site",
+    "sigma_year", 
+    "log_y_missing", 
+    "log_y_shift_missing"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.8, max_treedepth = 25),
+  seed = seed
+)
+
+# save fitted
+qsave(draws_mat_normal_class, file = "outputs/fitted/mat-normal-class-draws-short.qs")
+
+# rm giant draws file
+rm(draws_mat_normal_class)
+
+# compile and sample from matrix normal model
+multi_normal_file <- file.path("src/multi_normal.stan")
+mod_multi_normal <- stan_model(file = multi_normal_file)
+
+# define some initial conditions
+empirical_corr <- kronecker(empirical_corr_sp, empirical_corr_class)
+init_multi_normal <- lapply(
+  seq_len(chains),
+  function(x) list(
+    L = t(chol(empirical_corr))
+  )
+)
+draws_multi_normal <- sampling(
+  object = mod_multi_normal,
+  data = dat,
+  init = init_multi_normal,
+  pars = c(
+    "Sigma", 
+    "alpha", 
+    "beta", 
+    "rho", 
+    "tau", 
+    "sigma_river", 
+    "sigma_reach", 
+    "sigma_site",
+    "sigma_year", 
+    "log_y_missing", 
+    "log_y_shift_missing"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.8, max_treedepth = 25),
+  seed = seed
+)
+
+# save fitted
+qsave(draws_multi_normal, file = "outputs/fitted/multi-normal-draws-short.qs")
+
+# rm giant draws file
+rm(draws_multi_normal)
+
+
 
 # load and summarise fitted
 draws_alt <- qread("outputs/fitted/mat-normal-draws.qs")
 sum_alt <- summary(draws_alt)
 
+## TODO: write some helper functions to extract and reformat outputs
 cov_sp <- matrix(
   sum_alt$summary[grepl("Sigma_sp", rownames(sum_alt$summary)), "mean"],
   nrow = nsp,
@@ -278,7 +439,3 @@ sum_alt$summary[grepl("rho", rownames(sum_alt$summary)), ]
 # plot all against priors
 
 # design main output plots
-
-## TODO: decide if singledim or unstruc models are feasible or worthwhile
-##   should be easy by setting one of the mats to I(nsp/nclass) or just writing
-##   an unstruc version
