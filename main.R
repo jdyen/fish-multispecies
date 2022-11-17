@@ -3,7 +3,7 @@
 
 # Author: Jian Yen
 # Date created: 2021/12/01
-# Updated: 2022/03/25
+# Updated: 2022/06/29
 
 # packages for data access and manipulation
 library(aae.hydro)
@@ -36,10 +36,21 @@ for (i in seq_along(flow)) {
 }
 
 # define size class bins
-size_breaks <- c(0, 30, 50, 100, 200, 400, 1600)
-vefmap <- vefmap %>% mutate(
-  size_class = cut(length_mm, breaks = size_breaks, labels = FALSE)
-)
+## DO LIFE STAGES FOR EACH SPECIES? c(early, juv, adult)?
+# size_breaks <- c(0, 30, 50, 100, 200, 400, 1600)
+# vefmap <- vefmap %>% mutate(
+#   size_class = cut(length_mm, breaks = size_breaks, labels = FALSE)
+# )
+# VERSION USING QUANTILES TO DEFINE 3 CATEGORIES 
+#   CAN EASILY REPLACE WITH SPECIES-SPECIFIC LENGTH THRESHOLDS
+vefmap <- vefmap %>% 
+  group_by(scientific_name) %>%
+  summarise(
+    low_cutoff = quantile(length_mm, probs = 0.25, na.rm = TRUE),
+    high_cutoff = quantile(length_mm, probs = 0.75, na.rm = TRUE)
+  ) %>%
+  right_join(vefmap, by = "scientific_name") %>%
+  mutate(size_class = ifelse(length_mm < low_cutoff, 1, ifelse(length_mm > high_cutoff, 3, 2)))
 
 # calculate electro effort
 effort <- vefmap %>% 
@@ -67,7 +78,7 @@ priority_spp <- c(
 #   length data only
 size_abundance <- vefmap %>%
   filter(!is.na(length_mm), scientific_name %in% priority_spp) %>%
-  group_by(waterbody, reach, site_name, id_survey, sdate, scientific_name, size_class) %>%
+  group_by(waterbody, reach, site_name, id_survey, sdate, scientific_name, size_class, gear_type) %>%
   summarise(
     count = n()
   ) %>%
@@ -78,7 +89,7 @@ size_abundance <- vefmap %>%
 # grab a list of unique sites/years and fill an array with counts for each
 #   site, year, species, and size class
 info <- size_abundance %>% 
-  select(waterbody, reach, site_name, id_survey, sdate, effort) %>%
+  select(waterbody, reach, site_name, id_survey, sdate, effort, gear_type) %>%
   mutate(syear = year(sdate)) %>%
   distinct()
 info <- add_gauge(info)
@@ -98,15 +109,36 @@ for (i in seq_len(nrow(size_abundance))) {
   y[tmp$site_name, as.character(year(tmp$sdate)), tmp$scientific_name, as.character(tmp$size_class)] <- tmp$count
 }
 
-## NOTE: some surveys at a single site occur twice in a year; these are currently
-##   omitted from analyses due to data format (site x year)
-
 # which sites were visited?
 visited <- apply(y, c(1, 2), sum) > 0
 
 # calculate covariates
-size_abundance_covariates <- get_metrics(flow, info)
-covars <- c("ave_spring", "ave_summer", "ave_antecedent", "low_flow", "cv_flow")
+threshold_list <- c(
+  "goulburn_river_r4" = 600,
+  "goulburn_river_r5" = 600,
+  "broken_river_r2" = 15,
+  "broken_river_r3" = 15,
+  "broken_creek_r4" = 200,
+  "broken_creek_r5" = 200,
+  "campaspe_river_r2" = 10,
+  "campaspe_river_r3" = 10,
+  "campaspe_river_r4" = 10,
+  "loddon_river_r2" = 25,
+  "loddon_river_r3" = 25,
+  "loddon_river_r4" = 25,
+  "loddon_river_r5" = 125,
+  "pyramid_creek_rNA" = 90,
+  "wimmera_river_r2" = 15,
+  "wimmera_river_r3" = 15,
+  "burnt_creek_r1" = 1,
+  "burnt_creek_r2" = 1,
+  "little_murray_river_rNA" = 1,
+  "mackenzie_river_r2" = 10,
+  "mackenzie_river_r3" = 10,
+  "mt_william_creek_rNA" = 5
+)
+size_abundance_covariates <- get_metrics(flow, info, threshold_list)
+covars <- c("ave_winter", "ave_spring", "ave_summer", "ave_antecedent", "low_flow", "cv_flow", "survey_flow")
 ncovar <- length(covars)
 X <- array(NA, dim = c(nsite, nyear, ncovar))
 dimnames(X) <- list(
@@ -130,9 +162,12 @@ dimnames(eff) <- list(
   sort(unique(info$site_name)),
   sort(unique(info$syear))
 )
+gear <- array(0, dim = c(nsite, nyear))
+dimnames(gear) <- dimnames(eff)
 for (i in seq_len(nrow(info))) {
   tmp <- info[i, ]
   eff[tmp$site_name, as.character(year(tmp$sdate))] <- tmp$effort
+  gear[tmp$site_name, as.character(year(tmp$sdate))] <- tmp$gear_type
 }
 eff <- ifelse(eff == 0, median(eff[eff > 0]), eff)
 
@@ -159,6 +194,7 @@ river <- rebase_factor(river[c(visited)])
 reach <- rebase_factor(reach[c(visited)])
 site <- rebase_factor(site[c(visited)])
 year <- rebase_factor(year[c(visited)])
+gear <- rebase_factor(gear[c(visited)])
 dat <- list(
   N = nrow(y_diminished), K = ncovar,
   nsp = nsp, nclass = nclass, nq = nsp * nclass,
@@ -169,22 +205,40 @@ dat <- list(
   nreach = max(reach),
   nsite = max(site),
   nyear = max(year),
+  ngear = max(gear),
   river = river,
   reach = reach,
   site = site,
   year = year,
-  phi_scale = 5.,
-  main_scale = 5.,
-  sigma_scale = 5.,
+  gear = gear,
+  main_scale = 3.,
+  sigma_scale = 3.,
   sigma_scale2 = 3.,
-  ar_scale = 0.5
+  ar_scale = 1.
 )
 
-# think through this, should be identifying each survey based on
-#  its position in diminished data set, then linking each year to
-#  the previous year. Records 0 if site not visited in previous
-#  year, which can be used in the Stan model to check for form of
-#  ar_term.
+# add a flattened version of y
+## TRANSPOSED BECAUSE MODEL DEFINES mu[Q, N] and then flattens this
+dat$yflat <- c(t(dat$y))
+
+## TRANSPOSE X FOR CURRENT VERSION TOO
+dat$X <- t(dat$X)
+
+# and some extra terms for the zero-inflation part of the model
+dat$nflat <- length(dat$yflat)
+dat$zero_idx <- which(dat$yflat == 0)
+dat$nzero <- length(dat$zero_idx)
+dat$nonzero_idx <- which(dat$yflat > 0)
+dat$notzero <- length(dat$nonzero_idx)
+
+# add spline settings
+# dat$hs_df <- rep(2, times = dat$K)
+# dat$hs_df_global <- rep(2, times = dat$K)
+# dat$hs_df_slab <- rep(2, times = dat$K)
+# dat$hs_scale_global <- rep(3., times = dat$K)
+# dat$hs_scale_slab <- rep(3., times = dat$K)
+
+# add extra info on missing surveys
 y_previous_idx <- matrix(0, nrow = nsite, ncol = nyear)
 y_previous_idx[visited] <- seq_len(sum(visited))
 y_previous_idx <- cbind(rep(0, nsite), y_previous_idx[, -nyear])
@@ -205,17 +259,17 @@ dat$nmissing <- sum(missing_idx)
 dat$prev_idx[missing_idx] <- seq_len(dat$nmissing)
 
 # settings for MCMC
-seed <- 353532
+seed <- 1125343481
 
 # settings for MCMC
-iter <- 5000
-warmup <- 2000
+iter <- 2000
+warmup <- 1000
 chains <- 4
 cores <- 4
-thin <- 3
+thin <- 2
 
 # compile and sample from matrix normal model
-mat_normal_file <- file.path("src/matrix_normal.stan")
+mat_normal_file <- file.path("src/matrix_normal_nocovar.stan")
 mod_mat_normal <- stan_model(file = mat_normal_file)
 
 # define some initial conditions
@@ -233,209 +287,225 @@ draws_mat_normal <- sampling(
   data = dat,
   init = init_mat_normal,
   pars = c(
-    "Sigma_sp", 
-    "Sigma_class", 
-    "alpha", 
-    "beta", 
-    "rho", 
-    "tau", 
-    "sigma_river", 
-    "sigma_reach", 
+    "Sigma_sp",
+    "Sigma_class",
+    "alpha",
+    "sigma_river",
+    "sigma_reach",
     "sigma_site",
-    "sigma_year", 
-    "log_y_missing", 
-    "log_y_shift_missing",
-    "gamma_river",
-    "gamma_reach",
-    "gamma_site",
-    "gamma_year"
+    "sigma_year",
+    "sigma_gear",
+    "mu"
   ),
   chains = chains,
   iter = iter,
   warmup = warmup,
   thin = thin,
   cores = cores,
-  control = list(adapt_delta = 0.85, max_treedepth = 15),
+  control = list(adapt_delta = 0.95, max_treedepth = 25),
   seed = seed
 )
 
 # save fitted
-qsave(draws_mat_normal, file = "outputs/fitted/mat-normal-draws-short.qs")
-
-# rm giant draws file
+qsave(draws_mat_normal, file = "outputs/fitted/mat-normal-draws.qs")
+  
+# remove fitted model to free up space for other models
 rm(draws_mat_normal)
 
-# compile and sample from single-dimension matrix normal model
-mat_normal_single_file <- file.path("src/matrix_normal_single.stan")
-mod_mat_normal_single <- stan_model(file = mat_normal_single_file)
+# summarise outputs
+draws_sum <- summary(draws_mat_normal)$summary
+hist(draws_sum[, "Rhat"])
+hist(draws_sum[, "n_eff"])
 
-# need a new data file too (species are target here, repeat for class below)
-dat_spp <- dat
-dat_spp$ntarget <- dat_spp$nsp
-dat_spp$nother <- dat_spp$nclass
-dat_spp$nsp <- dat_spp$nclass <- NULL
+# summarise the covariance matrices
+draws_mat <- as.matrix(draws_mat_normal)
+Sigma_sp <- draws_mat[, grepl("Sigma_sp", colnames(draws_mat))]
+Sigma_class <- draws_mat[, grepl("Sigma_class", colnames(draws_mat))]
+cov_sp <- matrix(apply(Sigma_sp, 2, median), ncol = dat$nsp)
+cov_cl <- matrix(apply(Sigma_class, 2, median), ncol = dat$nclass)
 
-# define some initial conditions
-init_mat_normal_spp <- lapply(
-  seq_len(chains),
-  function(x) list(
-    L_target = t(chol(empirical_corr_sp))
-  )
-)
-draws_mat_normal_spp <- sampling(
-  object = mod_mat_normal_single,
-  data = dat_spp,
-  init = init_mat_normal_spp,
-  pars = c(
-    "Sigma_target", 
-    "sigma_other",
-    "alpha", 
-    "beta", 
-    "rho", 
-    "tau", 
-    "sigma_river", 
-    "sigma_reach", 
-    "sigma_site",
-    "sigma_year", 
-    "log_y_missing", 
-    "log_y_shift_missing"
-  ),
-  chains = chains,
-  iter = iter,
-  warmup = warmup,
-  thin = thin,
-  cores = cores,
-  control = list(adapt_delta = 0.8, max_treedepth = 15),
-  seed = seed
-)
-
-# save fitted
-qsave(draws_mat_normal_spp, file = "outputs/fitted/mat-normal-species-draws-short.qs")
-
-# rm giant draws file
-rm(draws_mat_normal_spp)
-
-# need a new data file too (classes are target here, species covered above)
-dat_class <- dat
-dat_class$ntarget <- dat_class$nclass
-dat_class$nother <- dat_class$nsp
-dat_class$nsp <- dat_class$nclass <- NULL
-
-# define some initial conditions
-init_mat_normal_class <- lapply(
-  seq_len(chains),
-  function(x) list(
-    L_target = t(chol(empirical_corr_class))
-  )
-)
-draws_mat_normal_class <- sampling(
-  object = mod_mat_normal_single,
-  data = dat_class,
-  init = init_mat_normal_class,
-  pars = c(
-    "Sigma_target", 
-    "sigma_other",
-    "alpha", 
-    "beta", 
-    "rho", 
-    "tau", 
-    "sigma_river", 
-    "sigma_reach", 
-    "sigma_site",
-    "sigma_year", 
-    "log_y_missing", 
-    "log_y_shift_missing"
-  ),
-  chains = chains,
-  iter = iter,
-  warmup = warmup,
-  thin = thin,
-  cores = cores,
-  control = list(adapt_delta = 0.8, max_treedepth = 25),
-  seed = seed
-)
-
-# save fitted
-qsave(draws_mat_normal_class, file = "outputs/fitted/mat-normal-class-draws-short.qs")
-
-# rm giant draws file
-rm(draws_mat_normal_class)
-
-# compile and sample from matrix normal model
-multi_normal_file <- file.path("src/multi_normal.stan")
-mod_multi_normal <- stan_model(file = multi_normal_file)
-
-# define some initial conditions
-empirical_corr <- kronecker(empirical_corr_sp, empirical_corr_class)
-init_multi_normal <- lapply(
-  seq_len(chains),
-  function(x) list(
-    L = t(chol(empirical_corr))
-  )
-)
-draws_multi_normal <- sampling(
-  object = mod_multi_normal,
-  data = dat,
-  init = init_multi_normal,
-  pars = c(
-    "Sigma", 
-    "alpha", 
-    "beta", 
-    "rho", 
-    "tau", 
-    "sigma_river", 
-    "sigma_reach", 
-    "sigma_site",
-    "sigma_year", 
-    "log_y_missing", 
-    "log_y_shift_missing"
-  ),
-  chains = chains,
-  iter = iter,
-  warmup = warmup,
-  thin = thin,
-  cores = cores,
-  control = list(adapt_delta = 0.8, max_treedepth = 25),
-  seed = seed
-)
-
-# save fitted
-qsave(draws_multi_normal, file = "outputs/fitted/multi-normal-draws-short.qs")
-
-# rm giant draws file
-rm(draws_multi_normal)
-
-
-
-# load and summarise fitted
-draws_alt <- qread("outputs/fitted/mat-normal-draws.qs")
-sum_alt <- summary(draws_alt)
-
-## TODO: write some helper functions to extract and reformat outputs
-cov_sp <- matrix(
-  sum_alt$summary[grepl("Sigma_sp", rownames(sum_alt$summary)), "mean"],
-  nrow = nsp,
-  byrow = TRUE
-)
-rownames(cov_sp) <- colnames(cov_sp) <- sort(unique(size_abundance$scientific_name))
-cov_class <- matrix(
-  sum_alt$summary[grepl("Sigma_class", rownames(sum_alt$summary)), "mean"],
-  nrow = nclass,
-  byrow = TRUE
-)
+# and convert these to correlations for plotting
 cor_sp <- cov2cor(cov_sp)
-cor_class <- cov2cor(cov_class)
+diag(cor_sp) <- 0
+cor_class <- cov2cor(cov_cl)
+diag(cor_class) <- 0
 
-# think about variances and covariances and correlations
-#   Size classes seem to have bigger absolute covars and corrs
+# TODO: try other approach again (species, class, unstruc)
 
-# extra other effects
-sum_alt$summary[grepl("sigma", rownames(sum_alt$summary)), ]
-sum_alt$summary[grepl("alpha", rownames(sum_alt$summary)), ]
-sum_alt$summary[grepl("beta", rownames(sum_alt$summary)), ]
-sum_alt$summary[grepl("tau", rownames(sum_alt$summary)), ]
-sum_alt$summary[grepl("rho", rownames(sum_alt$summary)), ]
-
-# plot all against priors
-
-# design main output plots
+# # rm giant draws file
+# rm(draws_mat_normal)
+# 
+# # compile and sample from single-dimension matrix normal model
+# mat_normal_single_file <- file.path("src/matrix_normal_single.stan")
+# mod_mat_normal_single <- stan_model(file = mat_normal_single_file)
+# 
+# # need a new data file too (species are target here, repeat for class below)
+# dat_spp <- dat
+# dat_spp$ntarget <- dat_spp$nsp
+# dat_spp$nother <- dat_spp$nclass
+# dat_spp$nsp <- dat_spp$nclass <- NULL
+# 
+# # define some initial conditions
+# init_mat_normal_spp <- lapply(
+#   seq_len(chains),
+#   function(x) list(
+#     L_target = t(chol(empirical_corr_sp))
+#   )
+# )
+# draws_mat_normal_spp <- sampling(
+#   object = mod_mat_normal_single,
+#   data = dat_spp,
+#   init = init_mat_normal_spp,
+#   pars = c(
+#     "Sigma_target", 
+#     "sigma_other",
+#     "alpha", 
+#     "beta", 
+#     "rho", 
+#     "tau", 
+#     "sigma_river", 
+#     "sigma_reach", 
+#     "sigma_site",
+#     "sigma_year", 
+#     "log_y_missing", 
+#     "log_y_shift_missing"
+#   ),
+#   chains = chains,
+#   iter = iter,
+#   warmup = warmup,
+#   thin = thin,
+#   cores = cores,
+#   control = list(adapt_delta = 0.8, max_treedepth = 15),
+#   seed = seed
+# )
+# 
+# # save fitted
+# qsave(draws_mat_normal_spp, file = "outputs/fitted/mat-normal-species-draws.qs")
+# 
+# # rm giant draws file
+# rm(draws_mat_normal_spp)
+# 
+# # need a new data file too (classes are target here, species covered above)
+# dat_class <- dat
+# dat_class$ntarget <- dat_class$nclass
+# dat_class$nother <- dat_class$nsp
+# dat_class$nsp <- dat_class$nclass <- NULL
+# 
+# # define some initial conditions
+# init_mat_normal_class <- lapply(
+#   seq_len(chains),
+#   function(x) list(
+#     L_target = t(chol(empirical_corr_class))
+#   )
+# )
+# draws_mat_normal_class <- sampling(
+#   object = mod_mat_normal_single,
+#   data = dat_class,
+#   init = init_mat_normal_class,
+#   pars = c(
+#     "Sigma_target", 
+#     "sigma_other",
+#     "alpha", 
+#     "beta", 
+#     "rho", 
+#     "tau", 
+#     "sigma_river", 
+#     "sigma_reach", 
+#     "sigma_site",
+#     "sigma_year", 
+#     "log_y_missing", 
+#     "log_y_shift_missing"
+#   ),
+#   chains = chains,
+#   iter = iter,
+#   warmup = warmup,
+#   thin = thin,
+#   cores = cores,
+#   control = list(adapt_delta = 0.8, max_treedepth = 25),
+#   seed = seed
+# )
+# 
+# # save fitted
+# qsave(draws_mat_normal_class, file = "outputs/fitted/mat-normal-class-draws.qs")
+# 
+# # rm giant draws file
+# rm(draws_mat_normal_class)
+# 
+# # compile and sample from matrix normal model
+# multi_normal_file <- file.path("src/multi_normal.stan")
+# mod_multi_normal <- stan_model(file = multi_normal_file)
+# 
+# # define some initial conditions
+# empirical_corr <- kronecker(empirical_corr_sp, empirical_corr_class)
+# init_multi_normal <- lapply(
+#   seq_len(chains),
+#   function(x) list(
+#     L = t(chol(empirical_corr))
+#   )
+# )
+# draws_multi_normal <- sampling(
+#   object = mod_multi_normal,
+#   data = dat,
+#   init = init_multi_normal,
+#   pars = c(
+#     "Sigma", 
+#     "alpha", 
+#     "beta", 
+#     "rho", 
+#     "tau", 
+#     "sigma_river", 
+#     "sigma_reach", 
+#     "sigma_site",
+#     "sigma_year", 
+#     "log_y_missing", 
+#     "log_y_shift_missing"
+#   ),
+#   chains = chains,
+#   iter = iter,
+#   warmup = warmup,
+#   thin = thin,
+#   cores = cores,
+#   control = list(adapt_delta = 0.8, max_treedepth = 25),
+#   seed = seed
+# )
+# 
+# # save fitted
+# qsave(draws_multi_normal, file = "outputs/fitted/multi-normal-draws.qs")
+# 
+# # rm giant draws file
+# rm(draws_multi_normal)
+# 
+# 
+# 
+# # load and summarise fitted
+# draws_alt <- qread("outputs/fitted/mat-normal-draws.qs")
+# sum_alt <- summary(draws_alt)
+# 
+# ## TODO: write some helper functions to extract and reformat outputs
+# cov_sp <- matrix(
+#   sum_alt$summary[grepl("Sigma_sp", rownames(sum_alt$summary)), "mean"],
+#   nrow = nsp,
+#   byrow = TRUE
+# )
+# rownames(cov_sp) <- colnames(cov_sp) <- sort(unique(size_abundance$scientific_name))
+# cov_class <- matrix(
+#   sum_alt$summary[grepl("Sigma_class", rownames(sum_alt$summary)), "mean"],
+#   nrow = nclass,
+#   byrow = TRUE
+# )
+# cor_sp <- cov2cor(cov_sp)
+# cor_class <- cov2cor(cov_class)
+# 
+# # think about variances and covariances and correlations
+# #   Size classes seem to have bigger absolute covars and corrs
+# 
+# # extra other effects
+# sum_alt$summary[grepl("sigma", rownames(sum_alt$summary)), ]
+# sum_alt$summary[grepl("alpha", rownames(sum_alt$summary)), ]
+# sum_alt$summary[grepl("beta", rownames(sum_alt$summary)), ]
+# sum_alt$summary[grepl("tau", rownames(sum_alt$summary)), ]
+# sum_alt$summary[grepl("rho", rownames(sum_alt$summary)), ]
+# 
+# # plot all against priors
+# 
+# # design main output plots
