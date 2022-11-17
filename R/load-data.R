@@ -150,18 +150,18 @@ rebase_factor <- function(x) {
 }
 
 # function to calculate flow metrics
-get_metrics <- function(x, y) {
+get_metrics <- function(x, y, threshold) {
   
   # work out relevant gauge for each reach
   reaches <- paste(y$waterbody, y$reach, sep = "_r")
-  y <- y %>% mutate(gauge = gauge_lookup[reaches])
+  y <- y %>% mutate(gauge = gauge_lookup[reaches], threshold = threshold[reaches])
   
   # go through each gauge and survey date and grab relevant metrics
   gauge_date <- y %>% distinct(gauge, sdate)
   out <- list(length = nrow(gauge_date))
   for (i in seq_len(nrow(gauge_date))) {
     xsub <- x[[as.character(gauge_date$gauge[i])]]
-    out[[i]] <- get_metrics_internal(xsub, gauge_date$sdate[i])
+    out[[i]] <- get_metrics_internal(xsub, gauge_date$sdate[i], gauge_date$threshold[i])
   }
   out <- do.call(rbind, out)
   
@@ -184,10 +184,13 @@ get_metrics <- function(x, y) {
 }
   
 # function to calculate specific flow metrics
-get_metrics_internal <- function(x, date) {
+get_metrics_internal <- function(x, date, threshold_sub = NULL) {
   
   # calculate 10th percentile for low flow calcs
-  q10 <- quantile(x$value, probs = 0.1, na.rm = TRUE)
+  if (is.null(threshold_sub))
+    q10 <- quantile(x$value, probs = 0.1, na.rm = TRUE)
+  else 
+    q10 <- threshold_sub
   
   # work out start and end dates for each season
   start_year <- year(date)
@@ -197,7 +200,7 @@ get_metrics_internal <- function(x, date) {
   end_year[!idx] <- end_year + 1L
   
   out <- data.frame(
-    ave_spring = calculate(
+    ave_spring = aae.hydro::calculate(
       x$value,
       x$date_formatted,
       resolution = survey(
@@ -207,7 +210,17 @@ get_metrics_internal <- function(x, date) {
       ),
       standardise = by_mean(range(year(x$date_formatted)))
     )$metric,
-    ave_summer = calculate(
+    ave_winter = aae.hydro::calculate(
+      x$value,
+      x$date_formatted,
+      resolution = survey(
+        season = 6:8,
+        start = dmy(paste("01-12-", start_year)),
+        end = dmy(paste("31-03-", end_year))
+      ),
+      standardise = by_mean(range(year(x$date_formatted)))
+    )$metric,
+    ave_summer = aae.hydro::calculate(
       x$value,
       x$date_formatted,
       resolution = survey(
@@ -217,7 +230,7 @@ get_metrics_internal <- function(x, date) {
       ),
       standardise = by_mean(range(year(x$date_formatted)))
     )$metric,
-    ave_antecedent = calculate(
+    ave_antecedent = aae.hydro::calculate(
       x$value,
       x$date_formatted,
       resolution = survey(
@@ -228,18 +241,18 @@ get_metrics_internal <- function(x, date) {
       ),
       standardise = by_mean(range(year(x$date_formatted)))
     )$metric,
-    low_flow = calculate(
+    low_flow = aae.hydro::calculate(
       x$value,
       x$date_formatted,
       resolution = survey(
-        season = 7:18,
+        season = 12:15,
         start = dmy(paste("01-07-", start_year)),
         end = dmy(paste("30-06-", end_year))
       ),
       fun = days_below,
       threshold = q10
     )$metric,
-    cv_flow = calculate(
+    cv_flow = aae.hydro::calculate(
       x$value,
       x$date_formatted,
       resolution = survey(
@@ -248,7 +261,8 @@ get_metrics_internal <- function(x, date) {
         end = dmy(paste("30-06-", end_year))
       ),
       fun = cv_fun
-    )$metric
+    )$metric,
+    survey_flow = x$value[match(date, ymd(x$date_formatted))]
   )
   
   # return
