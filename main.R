@@ -269,13 +269,13 @@ cores <- 4
 thin <- 2
 
 # compile and sample from matrix normal model
-mat_normal_file <- file.path("src/matrix_normal_nocovar.stan")
-mod_mat_normal <- stan_model(file = mat_normal_file)
+stan_file <- file.path("src/matrix_normal_nocovar.stan")
+mod <- stan_model(file = stan_file)
 
 # define some initial conditions
 empirical_corr_sp <- cor(apply(y, c(1, 3), sum))
 empirical_corr_class <- cor(apply(y, c(1, 4), sum))
-init_mat_normal <- lapply(
+init <- lapply(
   seq_len(chains),
   function(x) list(
     L_sp = t(chol(empirical_corr_sp)),
@@ -283,9 +283,9 @@ init_mat_normal <- lapply(
   )
 )
 draws_mat_normal <- sampling(
-  object = mod_mat_normal,
+  object = mod,
   data = dat,
-  init = init_mat_normal,
+  init = init,
   pars = c(
     "Sigma_sp",
     "Sigma_class",
@@ -302,7 +302,7 @@ draws_mat_normal <- sampling(
   warmup = warmup,
   thin = thin,
   cores = cores,
-  control = list(adapt_delta = 0.95, max_treedepth = 25),
+  control = list(adapt_delta = 0.9, max_treedepth = 15),
   seed = seed
 )
 
@@ -312,200 +312,169 @@ qsave(draws_mat_normal, file = "outputs/fitted/mat-normal-draws.qs")
 # remove fitted model to free up space for other models
 rm(draws_mat_normal)
 
-# summarise outputs
-draws_sum <- summary(draws_mat_normal)$summary
-hist(draws_sum[, "Rhat"])
-hist(draws_sum[, "n_eff"])
+# compile and sample from species-grouped model
+stan_file <- file.path("src/matrix_normal_single_nocovar.stan")
+mod <- stan_model(file = stan_file)
+
+# need a new data file (species are target here, repeat for class below)
+dat_spp <- dat
+dat_spp$ntarget <- dat_spp$nsp
+dat_spp$nother <- dat_spp$nclass
+
+# define some initial conditions
+init <- lapply(
+  seq_len(chains),
+  function(x) list(
+    L_target = t(chol(empirical_corr_sp))
+  )
+)
+
+# sample from posterior
+draws_mat_normal_species <- sampling(
+  object = mod,
+  data = dat_spp,
+  init = init,
+  pars = c(
+    "Sigma_target",
+    "sigma_other",
+    "alpha",
+    "sigma_river",
+    "sigma_reach",
+    "sigma_site",
+    "sigma_year",
+    "sigma_gear",
+    "mu"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.9, max_treedepth = 15),
+  seed = seed
+)
+
+# save fitted
+qsave(draws_mat_normal_species, file = "outputs/fitted/mat-normal-species-draws.qs")
+
+# remove fitted model to free up space for other models
+rm(draws_mat_normal_species)
+
+# repeat for class-grouped model
+dat_class <- dat
+dat_class$ntarget <- dat_spp$nclass
+dat_class$nother <- dat_spp$nsp
+
+# define some initial conditions
+init <- lapply(
+  seq_len(chains),
+  function(x) list(
+    L_target = t(chol(empirical_corr_class))
+  )
+)
+
+# sample from posterior
+draws_mat_normal_class <- sampling(
+  object = mod,
+  data = dat_class,
+  init = init,
+  pars = c(
+    "Sigma_target",
+    "sigma_other",
+    "alpha",
+    "sigma_river",
+    "sigma_reach",
+    "sigma_site",
+    "sigma_year",
+    "sigma_gear",
+    "mu"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.9, max_treedepth = 15),
+  seed = seed
+)
+
+# save fitted
+qsave(draws_mat_normal_class, file = "outputs/fitted/mat-normal-class-draws.qs")
+
+# remove fitted model to free up space for other models
+rm(draws_mat_normal_class)
+
+# compile and sample from species-grouped model
+stan_file <- file.path("src/multi_normal_nocovar.stan")
+mod <- stan_model(file = stan_file)
+
+# define some initial conditions
+empirical_corr <- kronecker(empirical_corr_sp, empirical_corr_class)
+init <- lapply(
+  seq_len(chains),
+  function(x) list(
+    L = t(chol(empirical_corr))
+  )
+)
+
+# sample from posterior
+draws_multi_normal <- sampling(
+  object = mod,
+  data = dat,
+  init = init,
+  pars = c(
+    "Sigma",
+    "alpha",
+    "sigma_river",
+    "sigma_reach",
+    "sigma_site",
+    "sigma_year",
+    "sigma_gear",
+    "mu"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.9, max_treedepth = 15),
+  seed = seed
+)
+
+# save fitted
+qsave(draws_multi_normal, file = "outputs/fitted/multi-normal-draws.qs")
+
+# remove fitted model to free up space for other models
+rm(draws_multi_normal)
+
+# summarise fitted models
+file_names <- dir("outputs/fitted")
+draws <- vector("list", length = length(file_names))
+for (i in seq_along(draws))
+  draws[[i]] <- qread(paste0("outputs/fitted/", file_names[i]))
+
+# summarise each and extract diagnostics
+for (i in seq_along(draws)) {
+  summary_tmp <- summary(draws[[i]])$summary
+  diagnostics[[i]] <- data.frame(
+    model = file_names[i],
+    par = rownames(summary_tmp),
+    rhat = summary_tmp[, "Rhat"],
+    n_eff = summary_tmp[, "n_eff"]
+  )
+  rm(summary_tmp)
+}
+diagnostics <- do.call(rbind, diagnostics)
 
 # summarise the covariance matrices
-draws_mat <- as.matrix(draws_mat_normal)
-Sigma_sp <- draws_mat[, grepl("Sigma_sp", colnames(draws_mat))]
-Sigma_class <- draws_mat[, grepl("Sigma_class", colnames(draws_mat))]
-cov_sp <- matrix(apply(Sigma_sp, 2, median), ncol = dat$nsp)
-cov_cl <- matrix(apply(Sigma_class, 2, median), ncol = dat$nclass)
+# draws_mat <- as.matrix(draws_mat_normal)
+# Sigma_sp <- draws_mat[, grepl("Sigma_sp", colnames(draws_mat))]
+# Sigma_class <- draws_mat[, grepl("Sigma_class", colnames(draws_mat))]
+# cov_sp <- matrix(apply(Sigma_sp, 2, median), ncol = dat$nsp)
+# cov_cl <- matrix(apply(Sigma_class, 2, median), ncol = dat$nclass)
 
 # and convert these to correlations for plotting
-cor_sp <- cov2cor(cov_sp)
-diag(cor_sp) <- 0
-cor_class <- cov2cor(cov_cl)
-diag(cor_class) <- 0
-
-# TODO: try other approach again (species, class, unstruc)
-
-# # rm giant draws file
-# rm(draws_mat_normal)
-# 
-# # compile and sample from single-dimension matrix normal model
-# mat_normal_single_file <- file.path("src/matrix_normal_single.stan")
-# mod_mat_normal_single <- stan_model(file = mat_normal_single_file)
-# 
-# # need a new data file too (species are target here, repeat for class below)
-# dat_spp <- dat
-# dat_spp$ntarget <- dat_spp$nsp
-# dat_spp$nother <- dat_spp$nclass
-# dat_spp$nsp <- dat_spp$nclass <- NULL
-# 
-# # define some initial conditions
-# init_mat_normal_spp <- lapply(
-#   seq_len(chains),
-#   function(x) list(
-#     L_target = t(chol(empirical_corr_sp))
-#   )
-# )
-# draws_mat_normal_spp <- sampling(
-#   object = mod_mat_normal_single,
-#   data = dat_spp,
-#   init = init_mat_normal_spp,
-#   pars = c(
-#     "Sigma_target", 
-#     "sigma_other",
-#     "alpha", 
-#     "beta", 
-#     "rho", 
-#     "tau", 
-#     "sigma_river", 
-#     "sigma_reach", 
-#     "sigma_site",
-#     "sigma_year", 
-#     "log_y_missing", 
-#     "log_y_shift_missing"
-#   ),
-#   chains = chains,
-#   iter = iter,
-#   warmup = warmup,
-#   thin = thin,
-#   cores = cores,
-#   control = list(adapt_delta = 0.8, max_treedepth = 15),
-#   seed = seed
-# )
-# 
-# # save fitted
-# qsave(draws_mat_normal_spp, file = "outputs/fitted/mat-normal-species-draws.qs")
-# 
-# # rm giant draws file
-# rm(draws_mat_normal_spp)
-# 
-# # need a new data file too (classes are target here, species covered above)
-# dat_class <- dat
-# dat_class$ntarget <- dat_class$nclass
-# dat_class$nother <- dat_class$nsp
-# dat_class$nsp <- dat_class$nclass <- NULL
-# 
-# # define some initial conditions
-# init_mat_normal_class <- lapply(
-#   seq_len(chains),
-#   function(x) list(
-#     L_target = t(chol(empirical_corr_class))
-#   )
-# )
-# draws_mat_normal_class <- sampling(
-#   object = mod_mat_normal_single,
-#   data = dat_class,
-#   init = init_mat_normal_class,
-#   pars = c(
-#     "Sigma_target", 
-#     "sigma_other",
-#     "alpha", 
-#     "beta", 
-#     "rho", 
-#     "tau", 
-#     "sigma_river", 
-#     "sigma_reach", 
-#     "sigma_site",
-#     "sigma_year", 
-#     "log_y_missing", 
-#     "log_y_shift_missing"
-#   ),
-#   chains = chains,
-#   iter = iter,
-#   warmup = warmup,
-#   thin = thin,
-#   cores = cores,
-#   control = list(adapt_delta = 0.8, max_treedepth = 25),
-#   seed = seed
-# )
-# 
-# # save fitted
-# qsave(draws_mat_normal_class, file = "outputs/fitted/mat-normal-class-draws.qs")
-# 
-# # rm giant draws file
-# rm(draws_mat_normal_class)
-# 
-# # compile and sample from matrix normal model
-# multi_normal_file <- file.path("src/multi_normal.stan")
-# mod_multi_normal <- stan_model(file = multi_normal_file)
-# 
-# # define some initial conditions
-# empirical_corr <- kronecker(empirical_corr_sp, empirical_corr_class)
-# init_multi_normal <- lapply(
-#   seq_len(chains),
-#   function(x) list(
-#     L = t(chol(empirical_corr))
-#   )
-# )
-# draws_multi_normal <- sampling(
-#   object = mod_multi_normal,
-#   data = dat,
-#   init = init_multi_normal,
-#   pars = c(
-#     "Sigma", 
-#     "alpha", 
-#     "beta", 
-#     "rho", 
-#     "tau", 
-#     "sigma_river", 
-#     "sigma_reach", 
-#     "sigma_site",
-#     "sigma_year", 
-#     "log_y_missing", 
-#     "log_y_shift_missing"
-#   ),
-#   chains = chains,
-#   iter = iter,
-#   warmup = warmup,
-#   thin = thin,
-#   cores = cores,
-#   control = list(adapt_delta = 0.8, max_treedepth = 25),
-#   seed = seed
-# )
-# 
-# # save fitted
-# qsave(draws_multi_normal, file = "outputs/fitted/multi-normal-draws.qs")
-# 
-# # rm giant draws file
-# rm(draws_multi_normal)
-# 
-# 
-# 
-# # load and summarise fitted
-# draws_alt <- qread("outputs/fitted/mat-normal-draws.qs")
-# sum_alt <- summary(draws_alt)
-# 
-# ## TODO: write some helper functions to extract and reformat outputs
-# cov_sp <- matrix(
-#   sum_alt$summary[grepl("Sigma_sp", rownames(sum_alt$summary)), "mean"],
-#   nrow = nsp,
-#   byrow = TRUE
-# )
-# rownames(cov_sp) <- colnames(cov_sp) <- sort(unique(size_abundance$scientific_name))
-# cov_class <- matrix(
-#   sum_alt$summary[grepl("Sigma_class", rownames(sum_alt$summary)), "mean"],
-#   nrow = nclass,
-#   byrow = TRUE
-# )
 # cor_sp <- cov2cor(cov_sp)
-# cor_class <- cov2cor(cov_class)
-# 
-# # think about variances and covariances and correlations
-# #   Size classes seem to have bigger absolute covars and corrs
-# 
-# # extra other effects
-# sum_alt$summary[grepl("sigma", rownames(sum_alt$summary)), ]
-# sum_alt$summary[grepl("alpha", rownames(sum_alt$summary)), ]
-# sum_alt$summary[grepl("beta", rownames(sum_alt$summary)), ]
-# sum_alt$summary[grepl("tau", rownames(sum_alt$summary)), ]
-# sum_alt$summary[grepl("rho", rownames(sum_alt$summary)), ]
-# 
-# # plot all against priors
-# 
-# # design main output plots
+# diag(cor_sp) <- 0
+# cor_class <- cov2cor(cov_cl)
+# diag(cor_class) <- 0
