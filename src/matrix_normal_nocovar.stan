@@ -40,8 +40,10 @@ transformed data {
 parameters {
   
   // regression coefficients with hierarchical structure
+  real<lower=0> sigma_main_alpha;
   vector<lower=0>[nsp] sigma_alpha;
-  vector[nsp] z_alpha_mean;
+  real z_alpha_main;
+  vector[nsp] z_alpha_sp;
   matrix[nsp, nclass] z_alpha;
 
   // random effects
@@ -98,7 +100,11 @@ transformed parameters {
   
   // rescale z-transformed covariate effects
   // with exchangeable priors within species (shared mean across all classes)
-  alpha = to_vector(rep_matrix(sigma_alpha, nclass) .* z_alpha + rep_matrix(main_scale * z_alpha_mean, nclass));
+  alpha = sigma_scale2 * sigma_main_alpha * 
+    to_vector(
+      rep_matrix(sigma_alpha, nclass) .* z_alpha + 
+      rep_matrix(main_scale * (z_alpha_main + z_alpha_sp), nclass)
+    );
 
   // calculate correlation term from species and class covariances
   for (i in 1:N)
@@ -124,9 +130,11 @@ transformed parameters {
 model {
   
   // priors for fixed part of linear predictor
-  z_alpha_mean ~ std_normal();
+  z_alpha_main ~ std_normal();
+  z_alpha_sp ~ std_normal();
   to_vector(z_alpha) ~ std_normal();
   sigma_alpha ~ std_normal();
+  sigma_main_alpha ~ std_normal();
 
   // random effects
   to_vector(gamma_river) ~ std_normal();

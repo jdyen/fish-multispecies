@@ -46,8 +46,8 @@ for (i in seq_along(flow)) {
 vefmap <- vefmap %>% 
   group_by(scientific_name) %>%
   summarise(
-    low_cutoff = quantile(length_mm, probs = 0.25, na.rm = TRUE),
-    high_cutoff = quantile(length_mm, probs = 0.75, na.rm = TRUE)
+    low_cutoff = 50, # quantile(length_mm, probs = 0.25, na.rm = TRUE),
+    high_cutoff = 200#quantile(length_mm, probs = 0.75, na.rm = TRUE)
   ) %>%
   right_join(vefmap, by = "scientific_name") %>%
   mutate(size_class = ifelse(length_mm < low_cutoff, 1, ifelse(length_mm > high_cutoff, 3, 2)))
@@ -67,11 +67,11 @@ priority_spp <- c(
   "macquaria_ambigua", 
   "perca_fluviatilis", 
   "gambusia_holbrooki", 
-  "gadopsis_marmoratus", 
+  # "gadopsis_marmoratus", 
   "melanotaenia_fluviatilis", 
-  "retropinna_semoni", 
-  "bidyanus_bidyanus", 
-  "maccullochella_macquariensis"
+  "retropinna_semoni"#, 
+  # "bidyanus_bidyanus", 
+  #"maccullochella_macquariensis"
 )
 
 # compile abundances by species and size class for records with
@@ -259,11 +259,11 @@ dat$nmissing <- sum(missing_idx)
 dat$prev_idx[missing_idx] <- seq_len(dat$nmissing)
 
 # settings for MCMC
-seed <- 1125343481
+seed <- 24124125
 
 # settings for MCMC
-iter <- 2000
-warmup <- 1000
+iter <- 5000
+warmup <- floor(iter / 2)
 chains <- 4
 cores <- 4
 thin <- 2
@@ -290,6 +290,12 @@ draws_mat_normal <- sampling(
     "Sigma_sp",
     "Sigma_class",
     "alpha",
+    "phi",
+    "sigma_main_river",
+    "sigma_main_reach",
+    "sigma_main_site",
+    "sigma_main_year",
+    "sigma_main_gear",
     "sigma_river",
     "sigma_reach",
     "sigma_site",
@@ -303,6 +309,7 @@ draws_mat_normal <- sampling(
   thin = thin,
   cores = cores,
   control = list(adapt_delta = 0.9, max_treedepth = 15),
+  init_r = 1.2,
   seed = seed
 )
 
@@ -351,6 +358,7 @@ draws_mat_normal_species <- sampling(
   thin = thin,
   cores = cores,
   control = list(adapt_delta = 0.9, max_treedepth = 15),
+  init_r = 1.2,
   seed = seed
 )
 
@@ -395,6 +403,7 @@ draws_mat_normal_class <- sampling(
   thin = thin,
   cores = cores,
   control = list(adapt_delta = 0.9, max_treedepth = 15),
+  init_r = 1.2,
   seed = seed
 )
 
@@ -438,6 +447,7 @@ draws_multi_normal <- sampling(
   thin = thin,
   cores = cores,
   control = list(adapt_delta = 0.9, max_treedepth = 15),
+  init_r = 1.2,
   seed = seed
 )
 
@@ -466,10 +476,23 @@ for (i in seq_along(draws)) {
 }
 diagnostics <- do.call(rbind, diagnostics)
 
+# calculate model fit
+fitted_vals <- Sigma <- vector("list", length = length(draws))
+for (i in seq_along(draws)) {
+  draws_mat <- as.matrix(draws[[i]])
+  fitted_vals[[i]] <- data.frame(
+    fitted = exp(apply(draws_mat[, grepl("mu_flat", colnames(draws_mat))], 2, median)),
+    observed = dat$yflat
+  )
+  covar_draws <- draws_mat[, grepl("Sigma", colnames(draws_mat))]
+  Sigma[[i]] <- data.frame(
+    lower = apply(covar_draws, 2, quantile, p = 0.1),
+    min = apply(covar_draws, 2, median),
+    upper = apply(covar_draws, 2, quantile, p = 0.9)
+  )
+}
+
 # summarise the covariance matrices
-# draws_mat <- as.matrix(draws_mat_normal)
-# Sigma_sp <- draws_mat[, grepl("Sigma_sp", colnames(draws_mat))]
-# Sigma_class <- draws_mat[, grepl("Sigma_class", colnames(draws_mat))]
 # cov_sp <- matrix(apply(Sigma_sp, 2, median), ncol = dat$nsp)
 # cov_cl <- matrix(apply(Sigma_class, 2, median), ncol = dat$nclass)
 
