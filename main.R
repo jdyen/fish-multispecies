@@ -308,7 +308,7 @@ draws_mat_normal <- sampling(
   warmup = warmup,
   thin = thin,
   cores = cores,
-  control = list(adapt_delta = 0.9, max_treedepth = 15),
+  control = list(adapt_delta = 0.95, max_treedepth = 20),
   init_r = 1.2,
   seed = seed
 )
@@ -457,6 +457,40 @@ qsave(draws_multi_normal, file = "outputs/fitted/multi-normal-draws.qs")
 # remove fitted model to free up space for other models
 rm(draws_multi_normal)
 
+# compile and sample from species-grouped model
+stan_file <- file.path("src/iid_nocovar.stan")
+mod <- stan_model(file = stan_file)
+
+# sample from posterior
+draws_iid <- sampling(
+  object = mod,
+  data = dat,
+  init = init,
+  pars = c(
+    "alpha",
+    "sigma_river",
+    "sigma_reach",
+    "sigma_site",
+    "sigma_year",
+    "sigma_gear",
+    "mu"
+  ),
+  chains = chains,
+  iter = iter,
+  warmup = warmup,
+  thin = thin,
+  cores = cores,
+  control = list(adapt_delta = 0.9, max_treedepth = 15),
+  init_r = 1.2,
+  seed = seed
+)
+
+# save fitted
+qsave(draws_iid, file = "outputs/fitted/iid-draws.qs")
+
+# remove fitted model to free up space for other models
+rm(draws_iid)
+
 # summarise fitted models
 file_names <- dir("outputs/fitted")
 draws <- vector("list", length = length(file_names))
@@ -464,6 +498,7 @@ for (i in seq_along(draws))
   draws[[i]] <- qread(paste0("outputs/fitted/", file_names[i]))
 
 # summarise each and extract diagnostics
+diagnostics <- vector("list", length = length(draws))
 for (i in seq_along(draws)) {
   summary_tmp <- summary(draws[[i]])$summary
   diagnostics[[i]] <- data.frame(
@@ -481,23 +516,97 @@ fitted_vals <- Sigma <- vector("list", length = length(draws))
 for (i in seq_along(draws)) {
   draws_mat <- as.matrix(draws[[i]])
   fitted_vals[[i]] <- data.frame(
-    fitted = exp(apply(draws_mat[, grepl("mu_flat", colnames(draws_mat))], 2, median)),
+    fitted = exp(apply(draws_mat[, grepl("mu\\[", colnames(draws_mat))], 2, median)),
     observed = dat$yflat
   )
-  covar_draws <- draws_mat[, grepl("Sigma", colnames(draws_mat))]
-  Sigma[[i]] <- data.frame(
-    lower = apply(covar_draws, 2, quantile, p = 0.1),
-    min = apply(covar_draws, 2, median),
-    upper = apply(covar_draws, 2, quantile, p = 0.9)
-  )
+  
+  if (file_names[[i]] != "iid-draws.qs") {
+    covar_draws <- draws_mat[, grepl("Sigma", colnames(draws_mat))]
+    Sigma[[i]] <- data.frame(
+      lower = apply(covar_draws, 2, quantile, p = 0.1),
+      min = apply(covar_draws, 2, median),
+      upper = apply(covar_draws, 2, quantile, p = 0.9)
+    )
+  }
+  
 }
 
-# summarise the covariance matrices
-# cov_sp <- matrix(apply(Sigma_sp, 2, median), ncol = dat$nsp)
-# cov_cl <- matrix(apply(Sigma_class, 2, median), ncol = dat$nclass)
+# plot covariances as correlations
+Sigma[[3]] <- Sigma[[3]] %>%
+  mutate(
+    id = rownames(Sigma[[3]]),
+    species_a = substr(id, 10, 10),
+    species_b = substr(id, 12, 12),
+    class_a = substr(id, 13, 13),
+    class_b = substr(id, 15, 15),
+    variable = ifelse(grepl("_sp", id), "Species", "Size class")
+  )
 
-# and convert these to correlations for plotting
-# cor_sp <- cov2cor(cov_sp)
-# diag(cor_sp) <- 0
-# cor_class <- cov2cor(cov_cl)
-# diag(cor_class) <- 0
+Sigma[[3]] <- Sigma[[3]] %>%
+  mutate(
+    corr = c(Sigma[[3]] %>%
+      filter(variable == "Species") %>%
+      pull(min) %>%
+      matrix(ncol = 7) %>%
+      cov2cor(),
+      Sigma[[3]] %>%
+        filter(variable == "Size class") %>%
+        pull(min) %>%
+        matrix(ncol = 3) %>%
+        cov2cor()
+    )
+  )
+
+covar_species <- Sigma[[3]] %>%
+  filter(variable == "Species") %>%
+  mutate(
+    species_a = priority_spp[as.numeric(species_a)],
+    species_b = priority_spp[as.numeric(species_b)],
+    species_a = gsub("_", " ", species_a),
+    species_a = paste0(toupper(substr(species_a, 1, 1)), substr(species_a, 2, nchar(species_a))),
+    species_b = gsub("_", " ", species_b),
+    species_b = paste0(toupper(substr(species_b, 1, 1)), substr(species_b, 2, nchar(species_b))),
+    Covariance = min
+  ) %>%
+  ggplot(aes(x = species_a, y = species_b)) +
+  geom_tile(aes(fill = Covariance)) +
+  xlab("Species") +
+  ylab("Species") +
+  theme(axis.text.x = element_text(angle = -90, hjust = 0))
+
+ggsave(
+  covar_species,
+  file = "outputs/figures/covar-species.png",
+  device = png,
+  units = "in",
+  dpi = 600,
+  width = 6,
+  height = 5
+)
+
+class_list <- c("< 50 mm", "50-200 mm", "> 200 mm")
+covar_class <- Sigma[[3]] %>%
+  filter(variable == "Size class") %>%
+  mutate(
+    class_a = class_list[as.numeric(class_a)],
+    class_b = class_list[as.numeric(class_b)],
+    class_a = factor(class_a, levels = class_list),
+    class_b = factor(class_b, levels = class_list),
+    Covariance = min
+  ) %>%
+  ggplot(aes(x = class_a, y = class_b)) +
+  geom_tile(aes(fill = Covariance)) +
+  xlab("Size class") +
+  ylab("Size class") +
+  theme(axis.text.x = element_text(angle = -90, hjust = 0))
+ggsave(
+  covar_class,
+  file = "outputs/figures/covar-class.png",
+  device = png,
+  units = "in",
+  dpi = 600,
+  width = 6,
+  height = 5
+)
+
+
