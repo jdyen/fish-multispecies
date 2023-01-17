@@ -38,19 +38,20 @@ for (i in seq_along(flow)) {
 # define size class bins
 ## DO LIFE STAGES FOR EACH SPECIES? c(early, juv, adult)?
 # size_breaks <- c(0, 30, 50, 100, 200, 400, 1600)
-# vefmap <- vefmap %>% mutate(
-#   size_class = cut(length_mm, breaks = size_breaks, labels = FALSE)
-# )
+size_breaks <- c(0, 30, 50, 200, 500, 1600)
+vefmap <- vefmap %>% mutate(
+  size_class = cut(length_mm, breaks = size_breaks, labels = FALSE)
+)
 # VERSION USING QUANTILES TO DEFINE 3 CATEGORIES 
 #   CAN EASILY REPLACE WITH SPECIES-SPECIFIC LENGTH THRESHOLDS
-vefmap <- vefmap %>% 
-  group_by(scientific_name) %>%
-  summarise(
-    low_cutoff = 50, # quantile(length_mm, probs = 0.25, na.rm = TRUE),
-    high_cutoff = 200#quantile(length_mm, probs = 0.75, na.rm = TRUE)
-  ) %>%
-  right_join(vefmap, by = "scientific_name") %>%
-  mutate(size_class = ifelse(length_mm < low_cutoff, 1, ifelse(length_mm > high_cutoff, 3, 2)))
+# vefmap <- vefmap %>% 
+#   group_by(scientific_name) %>%
+#   summarise(
+#     low_cutoff = 50, # quantile(length_mm, probs = 0.25, na.rm = TRUE),
+#     high_cutoff = 200#quantile(length_mm, probs = 0.75, na.rm = TRUE)
+#   ) %>%
+#   right_join(vefmap, by = "scientific_name") %>%
+#   mutate(size_class = ifelse(length_mm < low_cutoff, 1, ifelse(length_mm > high_cutoff, 3, 2)))
 
 # calculate electro effort
 effort <- vefmap %>% 
@@ -231,13 +232,6 @@ dat$nzero <- length(dat$zero_idx)
 dat$nonzero_idx <- which(dat$yflat > 0)
 dat$notzero <- length(dat$nonzero_idx)
 
-# add spline settings
-# dat$hs_df <- rep(2, times = dat$K)
-# dat$hs_df_global <- rep(2, times = dat$K)
-# dat$hs_df_slab <- rep(2, times = dat$K)
-# dat$hs_scale_global <- rep(3., times = dat$K)
-# dat$hs_scale_slab <- rep(3., times = dat$K)
-
 # add extra info on missing surveys
 y_previous_idx <- matrix(0, nrow = nsite, ncol = nyear)
 y_previous_idx[visited] <- seq_len(sum(visited))
@@ -268,150 +262,9 @@ chains <- 4
 cores <- 4
 thin <- 2
 
-# compile and sample from matrix normal model
-stan_file <- file.path("src/matrix_normal_nocovar.stan")
-mod <- stan_model(file = stan_file)
-
 # define some initial conditions
 empirical_corr_sp <- cor(apply(y, c(1, 3), sum))
 empirical_corr_class <- cor(apply(y, c(1, 4), sum))
-init <- lapply(
-  seq_len(chains),
-  function(x) list(
-    L_sp = t(chol(empirical_corr_sp)),
-    L_class = t(chol(empirical_corr_class))
-  )
-)
-draws_mat_normal <- sampling(
-  object = mod,
-  data = dat,
-  init = init,
-  pars = c(
-    "Sigma_sp",
-    "Sigma_class",
-    "alpha",
-    "phi",
-    "sigma_main_river",
-    "sigma_main_reach",
-    "sigma_main_site",
-    "sigma_main_year",
-    "sigma_main_gear",
-    "sigma_river",
-    "sigma_reach",
-    "sigma_site",
-    "sigma_year",
-    "sigma_gear",
-    "mu"
-  ),
-  chains = chains,
-  iter = iter,
-  warmup = warmup,
-  thin = thin,
-  cores = cores,
-  control = list(adapt_delta = 0.95, max_treedepth = 20),
-  init_r = 1.2,
-  seed = seed
-)
-
-# save fitted
-qsave(draws_mat_normal, file = "outputs/fitted/mat-normal-draws.qs")
-  
-# remove fitted model to free up space for other models
-rm(draws_mat_normal)
-
-# compile and sample from species-grouped model
-stan_file <- file.path("src/matrix_normal_single_nocovar.stan")
-mod <- stan_model(file = stan_file)
-
-# need a new data file (species are target here, repeat for class below)
-dat_spp <- dat
-dat_spp$ntarget <- dat_spp$nsp
-dat_spp$nother <- dat_spp$nclass
-
-# define some initial conditions
-init <- lapply(
-  seq_len(chains),
-  function(x) list(
-    L_target = t(chol(empirical_corr_sp))
-  )
-)
-
-# sample from posterior
-draws_mat_normal_species <- sampling(
-  object = mod,
-  data = dat_spp,
-  init = init,
-  pars = c(
-    "Sigma_target",
-    "sigma_other",
-    "alpha",
-    "sigma_river",
-    "sigma_reach",
-    "sigma_site",
-    "sigma_year",
-    "sigma_gear",
-    "mu"
-  ),
-  chains = chains,
-  iter = iter,
-  warmup = warmup,
-  thin = thin,
-  cores = cores,
-  control = list(adapt_delta = 0.9, max_treedepth = 15),
-  init_r = 1.2,
-  seed = seed
-)
-
-# save fitted
-qsave(draws_mat_normal_species, file = "outputs/fitted/mat-normal-species-draws.qs")
-
-# remove fitted model to free up space for other models
-rm(draws_mat_normal_species)
-
-# repeat for class-grouped model
-dat_class <- dat
-dat_class$ntarget <- dat_spp$nclass
-dat_class$nother <- dat_spp$nsp
-
-# define some initial conditions
-init <- lapply(
-  seq_len(chains),
-  function(x) list(
-    L_target = t(chol(empirical_corr_class))
-  )
-)
-
-# sample from posterior
-draws_mat_normal_class <- sampling(
-  object = mod,
-  data = dat_class,
-  init = init,
-  pars = c(
-    "Sigma_target",
-    "sigma_other",
-    "alpha",
-    "sigma_river",
-    "sigma_reach",
-    "sigma_site",
-    "sigma_year",
-    "sigma_gear",
-    "mu"
-  ),
-  chains = chains,
-  iter = iter,
-  warmup = warmup,
-  thin = thin,
-  cores = cores,
-  control = list(adapt_delta = 0.9, max_treedepth = 15),
-  init_r = 1.2,
-  seed = seed
-)
-
-# save fitted
-qsave(draws_mat_normal_class, file = "outputs/fitted/mat-normal-class-draws.qs")
-
-# remove fitted model to free up space for other models
-rm(draws_mat_normal_class)
 
 # compile and sample from species-grouped model
 stan_file <- file.path("src/multi_normal_nocovar.stan")
@@ -439,15 +292,16 @@ draws_multi_normal <- sampling(
     "sigma_site",
     "sigma_year",
     "sigma_gear",
-    "mu"
+    "mu",
+    "phi"
   ),
   chains = chains,
   iter = iter,
   warmup = warmup,
   thin = thin,
   cores = cores,
-  control = list(adapt_delta = 0.9, max_treedepth = 15),
-  init_r = 1.2,
+  control = list(adapt_delta = 0.85, max_treedepth = 13),
+  init_r = 1.5,
   seed = seed
 )
 
@@ -473,15 +327,16 @@ draws_iid <- sampling(
     "sigma_site",
     "sigma_year",
     "sigma_gear",
-    "mu"
+    "mu",
+    "phi"
   ),
   chains = chains,
   iter = iter,
   warmup = warmup,
   thin = thin,
   cores = cores,
-  control = list(adapt_delta = 0.9, max_treedepth = 15),
-  init_r = 1.2,
+  control = list(adapt_delta = 0.85, max_treedepth = 13),
+  init_r = 1.5,
   seed = seed
 )
 
@@ -608,5 +463,3 @@ ggsave(
   width = 6,
   height = 5
 )
-
-

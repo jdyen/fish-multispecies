@@ -91,7 +91,10 @@ transformed parameters {
 
   // rescale z-transformed covariate effects
   // with exchangeable priors within species (shared mean across all classes)
-  alpha = to_vector(rep_matrix(sigma_alpha, nclass) .* z_alpha + rep_matrix(main_scale * z_alpha_mean, nclass));
+  alpha = to_vector(
+    rep_matrix(sigma_alpha, nclass) .* z_alpha +
+    rep_matrix(main_scale * z_alpha_mean, nclass)
+  );
 
   // combine linear predictor
   mu = rep_matrix(alpha, N) +
