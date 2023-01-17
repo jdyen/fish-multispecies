@@ -102,7 +102,7 @@ transformed parameters {
      sigma_main_year * rep_matrix(sigma_year, N) .* gamma_year[, year] +
      sigma_main_gear * rep_matrix(sigma_gear, N) .* gamma_gear[, gear]) +
     rep_matrix(log_effort, nq) +
-    (rep_matrix(sigma, N) .* (L * eps));
+    W * eps;
 
   // flatten mu and theta_zero for likelihood calcs
   mu_flat = to_vector(mu);
