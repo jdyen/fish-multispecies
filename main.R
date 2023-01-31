@@ -386,80 +386,87 @@ for (i in seq_along(draws)) {
   
 }
 
+# TODO: plot diagnostics, fitted vs observed, calculate R2
+#    values and plot covar/corrs, partition covars and corrs
+#    between species and size classes
+# image(matrix(Sigma[[2]]$min, nrow = 35))
+# image(cov2cor(matrix(Sigma[[2]]$min, nrow = 35)))
+
+
 # plot covariances as correlations
-Sigma[[3]] <- Sigma[[3]] %>%
-  mutate(
-    id = rownames(Sigma[[3]]),
-    species_a = substr(id, 10, 10),
-    species_b = substr(id, 12, 12),
-    class_a = substr(id, 13, 13),
-    class_b = substr(id, 15, 15),
-    variable = ifelse(grepl("_sp", id), "Species", "Size class")
-  )
-
-Sigma[[3]] <- Sigma[[3]] %>%
-  mutate(
-    corr = c(Sigma[[3]] %>%
-      filter(variable == "Species") %>%
-      pull(min) %>%
-      matrix(ncol = 7) %>%
-      cov2cor(),
-      Sigma[[3]] %>%
-        filter(variable == "Size class") %>%
-        pull(min) %>%
-        matrix(ncol = 3) %>%
-        cov2cor()
-    )
-  )
-
-covar_species <- Sigma[[3]] %>%
-  filter(variable == "Species") %>%
-  mutate(
-    species_a = priority_spp[as.numeric(species_a)],
-    species_b = priority_spp[as.numeric(species_b)],
-    species_a = gsub("_", " ", species_a),
-    species_a = paste0(toupper(substr(species_a, 1, 1)), substr(species_a, 2, nchar(species_a))),
-    species_b = gsub("_", " ", species_b),
-    species_b = paste0(toupper(substr(species_b, 1, 1)), substr(species_b, 2, nchar(species_b))),
-    Covariance = min
-  ) %>%
-  ggplot(aes(x = species_a, y = species_b)) +
-  geom_tile(aes(fill = Covariance)) +
-  xlab("Species") +
-  ylab("Species") +
-  theme(axis.text.x = element_text(angle = -90, hjust = 0))
-
-ggsave(
-  covar_species,
-  file = "outputs/figures/covar-species.png",
-  device = png,
-  units = "in",
-  dpi = 600,
-  width = 6,
-  height = 5
-)
-
-class_list <- c("< 50 mm", "50-200 mm", "> 200 mm")
-covar_class <- Sigma[[3]] %>%
-  filter(variable == "Size class") %>%
-  mutate(
-    class_a = class_list[as.numeric(class_a)],
-    class_b = class_list[as.numeric(class_b)],
-    class_a = factor(class_a, levels = class_list),
-    class_b = factor(class_b, levels = class_list),
-    Covariance = min
-  ) %>%
-  ggplot(aes(x = class_a, y = class_b)) +
-  geom_tile(aes(fill = Covariance)) +
-  xlab("Size class") +
-  ylab("Size class") +
-  theme(axis.text.x = element_text(angle = -90, hjust = 0))
-ggsave(
-  covar_class,
-  file = "outputs/figures/covar-class.png",
-  device = png,
-  units = "in",
-  dpi = 600,
-  width = 6,
-  height = 5
-)
+# Sigma[[3]] <- Sigma[[3]] %>%
+#   mutate(
+#     id = rownames(Sigma[[3]]),
+#     species_a = substr(id, 10, 10),
+#     species_b = substr(id, 12, 12),
+#     class_a = substr(id, 13, 13),
+#     class_b = substr(id, 15, 15),
+#     variable = ifelse(grepl("_sp", id), "Species", "Size class")
+#   )
+# 
+# Sigma[[3]] <- Sigma[[3]] %>%
+#   mutate(
+#     corr = c(Sigma[[3]] %>%
+#       filter(variable == "Species") %>%
+#       pull(min) %>%
+#       matrix(ncol = 7) %>%
+#       cov2cor(),
+#       Sigma[[3]] %>%
+#         filter(variable == "Size class") %>%
+#         pull(min) %>%
+#         matrix(ncol = 3) %>%
+#         cov2cor()
+#     )
+#   )
+# 
+# covar_species <- Sigma[[3]] %>%
+#   filter(variable == "Species") %>%
+#   mutate(
+#     species_a = priority_spp[as.numeric(species_a)],
+#     species_b = priority_spp[as.numeric(species_b)],
+#     species_a = gsub("_", " ", species_a),
+#     species_a = paste0(toupper(substr(species_a, 1, 1)), substr(species_a, 2, nchar(species_a))),
+#     species_b = gsub("_", " ", species_b),
+#     species_b = paste0(toupper(substr(species_b, 1, 1)), substr(species_b, 2, nchar(species_b))),
+#     Covariance = min
+#   ) %>%
+#   ggplot(aes(x = species_a, y = species_b)) +
+#   geom_tile(aes(fill = Covariance)) +
+#   xlab("Species") +
+#   ylab("Species") +
+#   theme(axis.text.x = element_text(angle = -90, hjust = 0))
+# 
+# ggsave(
+#   covar_species,
+#   file = "outputs/figures/covar-species.png",
+#   device = png,
+#   units = "in",
+#   dpi = 600,
+#   width = 6,
+#   height = 5
+# )
+# 
+# class_list <- c("< 50 mm", "50-200 mm", "> 200 mm")
+# covar_class <- Sigma[[3]] %>%
+#   filter(variable == "Size class") %>%
+#   mutate(
+#     class_a = class_list[as.numeric(class_a)],
+#     class_b = class_list[as.numeric(class_b)],
+#     class_a = factor(class_a, levels = class_list),
+#     class_b = factor(class_b, levels = class_list),
+#     Covariance = min
+#   ) %>%
+#   ggplot(aes(x = class_a, y = class_b)) +
+#   geom_tile(aes(fill = Covariance)) +
+#   xlab("Size class") +
+#   ylab("Size class") +
+#   theme(axis.text.x = element_text(angle = -90, hjust = 0))
+# ggsave(
+#   covar_class,
+#   file = "outputs/figures/covar-class.png",
+#   device = png,
+#   units = "in",
+#   dpi = 600,
+#   width = 6,
+#   height = 5
+# )
